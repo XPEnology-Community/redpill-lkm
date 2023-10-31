@@ -107,7 +107,12 @@ int register_execve_interceptor()
         return -EEXIST;
     }
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,10,0)
     override_symbol_or_exit_int(sys_execve_ovs, "SyS_execve", SyS_execve_shim);
+#else
+    // TODO there is another __ia32_sys_execve, maybe need to override.
+    override_symbol_or_exit_int(sys_execve_ovs, "__x64_sys_execve", SyS_execve_shim);
+#endif
 
     pr_loc_inf("execve() interceptor registered");
     return 0;

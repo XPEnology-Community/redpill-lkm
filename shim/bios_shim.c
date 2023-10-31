@@ -5,7 +5,7 @@
  * The process relies on the fact that the original BIOS module keeps a vtable table in memory. That vtable contains
  * pointers to various functions used to communicate with the hardware. The most tricky part here is finding the vtable
  * and replacing calls in it with our own. Original ELF contains unscrambled symbols for the table under "synobios_ops"
- * name (see: readelf --syms /usr/lib/modules/synobios-dis.ko | grep 'synobios_ops'). However this is NOT a symbol which
+ * name (see: readelf --syms /usr/lib/modules/synobios.ko | grep 'synobios_ops'). However this is NOT a symbol which
  * gets exported to the kernel.
  *
  * When the Linux kernel loads a module it does a couple of things after loading the .ko file. From the important ones
@@ -25,7 +25,7 @@
  *  arch/x86/kernel/module.c:apply_relocate_add(). Since this function is external it can be "gently" replaced.
  *
  * During the lifetime of apply_relocate_add(), which is redirected to _apply_relocate_add() here, the full ELF with
- * symbol table is available and thus the vtable can be located using process_bios_symbols().  However, it cannot be
+ * symbol table is available and thus the vtable can be located using process_bios_symbols(). However, it cannot be
  * just like that modified at this moment (remember: we're way before module init is called) as 1) functions it points
  * to may be relocated still, and 2) it's hardware-dependent (as seen by doing print_debug_symbols() before & after
  * init). We need to hook to the module notification API and shim what's needed AFTER module started initializing.
@@ -55,6 +55,8 @@
 #include "../internal/helper/symbol_helper.h" //kernel_has_symbol()
 #include "bios/bios_shims_collection.h" //shim_bios_module(), unshim_bios_module(), shim_bios_disk_leds_ctrl()
 #include "bios/bios_hwcap_shim.h" //register_bios_hwcap_shim(), unregister_bios_hwcap_shim(), reset_bios_hwcap_shim()
+#include "bios/bios_psu_status_shim.h" //register_bios_psu_status_shim(), unregister_bios_psu_status_shim(), reset_bios_psu_status_shim()
+#include <linux/elf.h>
 #include <linux/notifier.h> //module notification
 #include <linux/module.h> //struct module
 
@@ -103,6 +105,7 @@ static int bios_module_notifier_handler(struct notifier_block * self, unsigned l
         enable_symbols_capture();
         reset_bios_shims();
         reset_bios_hwcap_shim();
+        reset_bios_psu_status_shim();
 
         return NOTIFY_OK;
     }
@@ -125,8 +128,10 @@ static int bios_module_notifier_handler(struct notifier_block * self, unsigned l
         bios_shimmed = true;
         pr_loc_inf("%s BIOS *fully* shimmed", mod->name);
     } else { //MODULE_STATE_COMING or MODULE_STATE_UNFORMED [but most likely actually MODULE_STATE_COMING]
-        if (likely(state == MODULE_STATE_COMING))
+        if (likely(state == MODULE_STATE_COMING)) {
             register_bios_hwcap_shim(hw_config);
+            register_bios_psu_status_shim(hw_config);
+        }
 
         pr_loc_inf("%s BIOS *early* shimmed", mod->name);
     }
@@ -274,6 +279,7 @@ int unregister_bios_shim(void)
 
     unshim_disk_leds_ctrl(); //this will be noop if nothing was registered
     unregister_bios_hwcap_shim(); //this will be noop if nothing was registered
+    unregister_bios_psu_status_shim(); //this will be noop if nothing was registered
 
     hw_config = NULL;
 
@@ -339,9 +345,16 @@ static int _apply_relocate_add(Elf64_Shdr *sechdrs, const char *strtab, unsigned
                 goto overflow;
                 break;
             case R_X86_64_PC32:
+            case R_X86_64_PLT32:
                 val -= (u64)loc;
                 *(u32 *)loc = val;
                 break;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,20,0)
+            case R_X86_64_PC64:
+                val -= (u64)loc;
+                *(u64 *)loc = val;
+                break;
+#endif
             default:
                 pr_err("%s: Unknown rela relocation: %llu\n",
                        me->name, ELF64_R_TYPE(rel[i].r_info));

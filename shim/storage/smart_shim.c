@@ -86,6 +86,7 @@
 #include "../../internal/scsi/hdparam.h" //a ton of ATA constants
 #include "../../internal/scsi/scsi_toolbox.h" //checking for "sd" driver load state
 #include "../../internal/override/override_symbol.h" //installing sd_ioctl_canary()
+#include "scsi_disk_serial.h" // rp_fetch_block_serial()
 #include <linux/fs.h> //struct block_device
 #include <linux/genhd.h> //struct gendisk
 #include <linux/blkdev.h> //struct block_device_operations
@@ -98,7 +99,7 @@
 #define pr_loc_dbg_ioctl(cmd_hex, subcmd_name, bdev) \
     pr_loc_dbg("Handling ioctl(0x%x)->%s for /dev/%s", cmd_hex, subcmd_name, (bdev)->bd_disk->disk_name);
 #define pr_loc_dbg_ioctl_unk(cmd_hex, subcmd_hex, bdev) \
-    pr_loc_dbg("Handling ioctl(cmd=0x%x ; sub=%0x%x) for /dev/%s - not hooked (noop)", \
+    pr_loc_dbg("Handling ioctl(cmd=0x%x ; sub=0x%x) for /dev/%s - not hooked (noop)", \
                cmd_hex, subcmd_hex, (bdev)->bd_disk->disk_name);
 #else
 #define pr_loc_dbg_ioctl(cmd_hex, subcmd_name, bdev) //noop
@@ -269,11 +270,12 @@ static __always_inline void put_ioctl_buffer(unsigned char *buffer)
 }
 
 /*************************************** ATAPI/WIN command interface handling *****************************************/
-static int populate_ata_id(const u8 *req_header, void __user *buff_ptr)
+static int populate_ata_id(const u8 *req_header, void __user *buff_ptr, const char* const disk_name)
 {
     pr_loc_dbg("Generating completely fake ATA IDENTITY");
 
     unsigned char *kbuf;
+    char disk_serial[DISK_NAME_LEN];
     kzalloc_or_exit_int(kbuf, HDIO_DRIVE_CMD_HDR_OFFSET + sizeof(struct rp_hd_driveid));
     struct rp_hd_driveid *did = (void *)(kbuf + HDIO_DRIVE_CMD_HDR_OFFSET); //did=drive ID
 
@@ -283,7 +285,8 @@ static int populate_ata_id(const u8 *req_header, void __user *buff_ptr)
     kbuf[HDIO_DRIVE_CMD_RET_SEC_CNT] = ATA_CMD_ID_ATA_SECTORS;
 
     did->config = 0x0000; //15th bit = ATA device, rest is reserved/obsolete
-    set_ata_string(did->serial_no, "VH1132", 20);
+    strscpy(disk_serial, disk_name, DISK_NAME_LEN > 20 ? 20 : DISK_NAME_LEN);
+    set_ata_string(did->serial_no, disk_serial, 20);
     set_ata_string(did->fw_rev, "1.13.2", 8);
     set_ata_string(did->model, "Virtual HDD", 40);
     did->reserved50 = (1 << 14); //"shall be set to one"
@@ -323,14 +326,14 @@ static int populate_ata_id(const u8 *req_header, void __user *buff_ptr)
  * @return definitive exit code for the ioctl(); in practice 0 when succedded [regardless of the modifications made] or
  *         the same error code as org_ioctl_exec_result passed
  */
-static int handle_ata_cmd_identify(int org_ioctl_exec_result, const u8 *req_header, void __user *buff_ptr)
+static int handle_ata_cmd_identify(int org_ioctl_exec_result, const u8 *req_header, void __user *buff_ptr, const char* const disk_name)
 {
     //ATA IDENTIFY should not fail - it may mean a problem with a disk or the "disk" is a adapter (e.g. IDE>SATA) with
     // no disk connected, or if executed against a USB flash drive... or it's an VirtIO SCSI disk read as ATA
     if (unlikely(org_ioctl_exec_result != 0)) {
         pr_loc_dbg("sd_ioctl(HDIO_DRIVE_CMD ; ATA_CMD_ID_ATA) failed with error=%d, attempting to emulate something",
                    org_ioctl_exec_result);
-        return populate_ata_id(req_header, buff_ptr);
+        return populate_ata_id(req_header, buff_ptr, disk_name);
     }
 
     //sanity check if requested ATA IDENTIFY sector count is really what we're planning to copy
@@ -538,6 +541,7 @@ static int populate_win_smart_log(const u8 *req_header, void __user *buff_ptr)
             smart_log[0] = WIN_SMART_DIG_LOG_VERSION;
             //if every other byte is zero we can ignore the rest of the fields according to Table 63. We also SHOULD NOT
             // generate a checksum for log directory (despite all others using checksums...)
+            break;// TODO check
 
         case 0x01: //summary SMART error log (see sect. 8.55.6.8.2 Summary error log sector)
             smart_log[0] = WIN_SMART_SUM_LOG_VERSION;
@@ -692,7 +696,19 @@ static int handle_hdio_drive_cmd_ioctl(struct block_device *bdev, fmode_t mode, 
         // we need to modify it to indicate SMART support
         case ATA_CMD_ID_ATA:
             pr_loc_dbg_ioctl(cmd, "ATA_CMD_ID_ATA", bdev);
-            return handle_ata_cmd_identify(ioctl_out, req_header, buff_ptr);
+
+            // TODO for some disks from HBA, we can get smart info from SG_IO,
+            // but for SA6400, DSM only fetch ATA smart info,
+            // we need convert SG_IO smart info into ATA format instead of fake it.
+
+            // use the real serial if it's not empty, other wise use the disk name
+            char * disk_serial;
+            disk_serial = rp_fetch_block_serial(bdev->bd_disk->disk_name);
+            if (disk_serial == NULL || strlen(disk_serial) < 3) {
+                disk_serial = bdev->bd_disk->disk_name;
+            }
+
+            return handle_ata_cmd_identify(ioctl_out, req_header, buff_ptr, disk_serial);
 
         //this command asks directly for the SMART data of the drive and will fail on drives with no real SMART support
         case ATA_CMD_SMART: //if the drive supports SMART it will just return the data as-is, no need to proxy

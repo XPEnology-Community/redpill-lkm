@@ -18,9 +18,25 @@
 static unsigned long org_shimmed_entries[VTK_SIZE] = { '\0' }; //original entries which were shimmed by custom entries
 static unsigned long cust_shimmed_entries[VTK_SIZE] = { '\0' }; //custom entries which were set as shims
 
+static int bios_get_power_status(POWER_INFO *power)
+{
+    power->power_1 = POWER_STATUS_GOOD;
+    power->power_2 = POWER_STATUS_GOOD;
+    return 0;
+}
+
 static int shim_get_gpio_pin_usable(int *pin)
 {
     pin[1] = 0;
+    return 0;
+}
+
+static int shim_set_gpio_pin_usable(int *pin)
+{
+    pr_loc_dbg("set_gpio pin info 0  %d", pin[0]);
+    pr_loc_dbg("set_gpio pin info 1  %d", pin[1]);
+    pr_loc_dbg("set_gpio pin info 2  %d", pin[2]);
+    pr_loc_dbg("set_gpio pin info 3  %d", pin[3]);
     return 0;
 }
 
@@ -34,7 +50,7 @@ static int bios_get_buz_clr(unsigned char *state)
 DECLARE_NULL_ZERO_INT(VTK_SET_FAN_STATE);
 DECLARE_NULL_ZERO_INT(VTK_SET_DISK_LED);
 DECLARE_NULL_ZERO_INT(VTK_SET_PWR_LED);
-DECLARE_NULL_ZERO_INT(VTK_SET_GPIO_PIN);
+// DECLARE_NULL_ZERO_INT(VTK_SET_GPIO_PIN);
 DECLARE_NULL_ZERO_INT(VTK_SET_GPIO_PIN_BLINK);
 DECLARE_NULL_ZERO_INT(VTK_SET_ALR_LED);
 DECLARE_NULL_ZERO_INT(VTK_SET_BUZ_CLR);
@@ -121,12 +137,14 @@ bool shim_bios_module(const struct hw_config *hw, struct module *mod, unsigned l
     SHIM_TO_NULL_ZERO_INT(VTK_SET_FAN_STATE);
     SHIM_TO_NULL_ZERO_INT(VTK_SET_DISK_LED);
     SHIM_TO_NULL_ZERO_INT(VTK_SET_PWR_LED);
-    SHIM_TO_NULL_ZERO_INT(VTK_SET_GPIO_PIN);
+    // SHIM_TO_NULL_ZERO_INT(VTK_SET_GPIO_PIN);
     _shim_bios_module_entry(VTK_GET_GPIO_PIN, shim_get_gpio_pin_usable);
+    _shim_bios_module_entry(VTK_SET_GPIO_PIN, shim_set_gpio_pin_usable);
     SHIM_TO_NULL_ZERO_INT(VTK_SET_GPIO_PIN_BLINK);
     SHIM_TO_NULL_ZERO_INT(VTK_SET_ALR_LED);
     _shim_bios_module_entry(VTK_GET_BUZ_CLR, bios_get_buz_clr);
     SHIM_TO_NULL_ZERO_INT(VTK_SET_BUZ_CLR);
+    _shim_bios_module_entry(VTK_GET_PWR_STATUS, bios_get_power_status);
     SHIM_TO_NULL_ZERO_INT(VTK_SET_CPU_FAN_STATUS);
     SHIM_TO_NULL_ZERO_INT(VTK_SET_PHY_LED);
     SHIM_TO_NULL_ZERO_INT(VTK_SET_HDD_ACT_LED);
@@ -219,6 +237,7 @@ int shim_disk_leds_ctrl(const struct hw_config *hw)
     pr_loc_dbg("Shimming disk led control API");
 
     int out;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
     //funcSYNOSATADiskLedCtrl exists on (almost?) all platforms, but it's null on some... go figure ;)
     if (funcSYNOSATADiskLedCtrl) {
         ov_funcSYNOSATADiskLedCtrl = override_symbol("funcSYNOSATADiskLedCtrl", funcSYNOSATADiskLedCtrl_shim);
@@ -229,6 +248,7 @@ int shim_disk_leds_ctrl(const struct hw_config *hw)
             return out;
         }
     }
+#endif
 
     if (kernel_has_symbol("syno_ahci_disk_led_enable")) {
         ov_syno_ahci_disk_led_enable = override_symbol("syno_ahci_disk_led_enable", syno_ahci_disk_led_enable_shim);
@@ -260,6 +280,8 @@ int unshim_disk_leds_ctrl(void)
 
     int out;
     bool failed = false;
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5,0,0)
     if (ov_funcSYNOSATADiskLedCtrl) {
         out = restore_symbol(ov_funcSYNOSATADiskLedCtrl);
         ov_funcSYNOSATADiskLedCtrl = NULL;
@@ -268,6 +290,7 @@ int unshim_disk_leds_ctrl(void)
             failed = true;
         }
     }
+#endif
 
     if (ov_syno_ahci_disk_led_enable) {
         out = restore_symbol(ov_syno_ahci_disk_led_enable);
